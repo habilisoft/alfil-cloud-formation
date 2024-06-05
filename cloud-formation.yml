@@ -1,0 +1,581 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Alfil Production Stack
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: Cluster
+        Parameters:
+          - ClusterName
+      -
+        Label:
+          default: Environment
+        Parameters:
+          - ActiveProfile
+      -
+        Label:
+          default: Instance
+        Parameters:
+          - InstanceImageId
+          - InstanceKeyPair
+          - InstanceType
+      -
+        Label:
+          default: Route53 Settings
+        Parameters:
+          - CertificateArn
+Parameters:
+  ClusterName:
+    Type: String
+    Description: Name of the cluster
+    Default: strategy-prod
+  ActiveProfile:
+    Type: String
+    Description: Active profile properties (dev, qa prod)
+    Default: prod
+  CertificateArn:
+    Type: String
+    Description: Arn of the certificate for https
+    Default: arn:aws:acm:us-east-1:654654402720:certificate/bd46792c-4141-46fb-afea-353f8d1534df
+  InstanceImageId:
+    Type: String
+    Description: EC2 Instance Image ID
+    Default: ami-0dde61416371df99a
+  InstanceKeyPair:
+    Type: String
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the cluster instances
+    MinLength: 1
+    MaxLength: 255
+    Default: Habilisoft
+  InstanceType:
+    Type: String
+    Description: Cluster instance Type
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t2.large
+      - t2.xlarge
+      - t2.2xlarge
+
+  DBInstanceType:
+    Type: String
+    Description: Database Instance Class database
+    Default: db.t3.micro
+    AllowedValues:
+      - db.t3.micro
+  DatasourceUser:
+    Type: String
+    Description: Datasource user
+    Default: master_user
+  DatasourcePassword:
+    Type: String
+    Description: Datasource Password
+    Default: Cloud$97531
+  DatabaseRetentionPeriod:
+    Type: Number
+    Default: 1
+    Description: Database backup retention period
+    MinValue: 0
+    MaxValue: 35
+  DataBaseStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 16384
+    Description: Database Storage Size (GB)
+  DatabaseName:
+    Type: String
+    Description: Name of the database
+    Default: alfil
+  DatabaseInstanceName:
+    Type: String
+    Description: Name of the Instance
+    Default: alfil-db
+Resources:
+  cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+  ecsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join
+        - ''
+        - - !Ref ClusterName
+          - '-ecsInstanceRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+  ecsServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole
+  ecsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ecsInstanceRole
+      Path: '/'
+  ecrUser:
+    Type: AWS::IAM::User
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess
+      UserName: !Join
+        - '-'
+        - - !Ref ClusterName
+          - 'ecr-user'
+  ecrUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref ecrUser
+  vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "172.31.0.0/16"
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+  routeTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        !Ref vpc
+  subnetZoneARoutingTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref routeTable
+      SubnetId: !Ref subnetZoneA
+  subnetZoneBRoutingTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref routeTable
+      SubnetId: !Ref subnetZoneB
+  internetGateway:
+    Type: AWS::EC2::InternetGateway
+  internetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref vpc
+      InternetGatewayId: !Ref internetGateway
+  route:
+    DependsOn:
+      - internetGateway
+      - routeTable
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref routeTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref internetGateway
+  subnetZoneA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: "172.31.3.0/24"
+      AvailabilityZone: "us-east-1a"
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref vpc
+  subnetZoneB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: "172.31.4.0/24"
+      AvailabilityZone: "us-east-1b"
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref vpc
+  ec2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - ''
+        - - !Ref ClusterName
+          - '-ec2'
+          - '-sg'
+      GroupDescription: "Secucrity group with access only from load balancer"
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+        -
+          IpProtocol: "-1"
+          SourceSecurityGroupId: !Ref loadBalancerSecurityGroup
+  loadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - ''
+        - - !Ref ClusterName
+          - '-loadbalancer'
+          - '-sg'
+      GroupDescription: "LoadBalancer security group with access from port 80 and 443 and 7788 for device WS connection"
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+        -
+          IpProtocol: "tcp"
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+        -
+          IpProtocol: "tcp"
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+  apiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Join
+        - '-'
+        - - !Ref cluster
+          - 'api-td'
+      ContainerDefinitions:
+        - Name: api
+          Cpu: 600
+          Memory: 800
+          MemoryReservation: 800
+          Image: 502154089745.dkr.ecr.us-east-1.amazonaws.com/alfil/api:main-1
+          PortMappings:
+            - ContainerPort: 80
+              HostPort: 0
+          LogConfiguration:
+            LogDriver: "awslogs"
+            Options:
+              awslogs-group: !Ref apiLogGroup
+              awslogs-region: "us-east-1"
+          Environment:
+            - Name: SPRING_DATASOURCE_URL
+              Value: !Join
+                - ''
+                - - "jdbc:postgresql://"
+                  - !GetAtt database.Endpoint.Address
+                  - ":"
+                  -  !GetAtt database.Endpoint.Port
+                  - "/"
+                  - !Ref DatabaseName
+            - Name: SPRING_DATASOURCE_USERNAME
+              Value: !Ref DatasourceUser
+            - Name: SPRING_DATASOURCE_PASSWORD
+              Value: !Ref DatasourcePassword
+            - Name: SERVER_PORT
+              Value: '80'
+            - Name: SPRING_PROFILES_ACTIVE
+              Value: !Ref ActiveProfile
+  apiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - autoScalingGroup
+      - loadBalancer
+      - apiTargetGroup
+      - apiListenerRule
+    Properties:
+      Cluster: !Ref cluster
+      TaskDefinition: !Ref apiTaskDefinition
+      DeploymentConfiguration:
+        MaximumPercent : 100
+        MinimumHealthyPercent : 0
+      ServiceName: !Join
+        - '-'
+        - - !Ref cluster
+          - 'api-svc'
+      DesiredCount: 1
+      LoadBalancers:
+        - TargetGroupArn: !Ref apiTargetGroup
+          ContainerPort: 80
+          ContainerName: 'api'
+      Role: !Ref 'ecsServiceRole'
+  apiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join
+        - '-'
+        - - !Ref cluster
+          - 'api'
+      RetentionInDays: 1
+  apiTargetGroup:
+    DependsOn:
+      - loadBalancer
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: 'pa-api-tg'
+      VpcId:
+        !Ref vpc
+      Protocol: "HTTP"
+      Port: 80
+      HealthCheckProtocol: "HTTP"
+      HealthCheckPort: "traffic-port"
+      HealthCheckIntervalSeconds: 35
+      HealthCheckTimeoutSeconds: 30
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      HealthCheckPath: "/api/healthcheck"
+      Matcher:
+        HttpCode: "200"
+      TargetType: "instance"
+      TargetGroupAttributes:
+        -
+          Key: "deregistration_delay.timeout_seconds"
+          Value: "0"
+  apiListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref listenerHttps
+      Priority: 1
+      Conditions:
+        -
+          Field: "path-pattern"
+          Values:
+            - "/api/*"
+      Actions:
+        -
+          Type: "forward"
+          TargetGroupArn: !Ref apiTargetGroup
+  uiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Join
+        - '-'
+        - - !Ref cluster
+          - 'web-ui-td'
+      ContainerDefinitions:
+        - Name: web-ui
+          Cpu: 400
+          Memory: 100
+          MemoryReservation: 100
+          Image: 502154089745.dkr.ecr.us-east-1.amazonaws.com/alfil/web-ui:main-1
+          PortMappings:
+            - ContainerPort: 80
+              HostPort: 0
+  uiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - autoScalingGroup
+      - loadBalancer
+      - uiTargetGroup
+      - uiListenerRuleHttps
+      - uiListenerRuleHttp
+    Properties:
+      Cluster: !Ref cluster
+      TaskDefinition: !Ref uiTaskDefinition
+      DeploymentConfiguration:
+        MaximumPercent : 100
+        MinimumHealthyPercent : 0
+      ServiceName: !Join
+        - '-'
+        - - !Ref cluster
+          - 'web-ui-service'
+      DesiredCount: 1
+      LoadBalancers:
+        - TargetGroupArn: !Ref uiTargetGroup
+          ContainerPort: 80
+          ContainerName: web-ui
+      Role: !Ref 'ecsServiceRole'
+  uiTargetGroup:
+    DependsOn:
+      - loadBalancer
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: "pa-web-ui-tg"
+      VpcId: !Ref vpc
+      Protocol: "HTTP"
+      Port: 80
+      HealthCheckProtocol: "HTTP"
+      HealthCheckPort: "traffic-port"
+      HealthCheckIntervalSeconds: 35
+      HealthCheckTimeoutSeconds: 30
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      HealthCheckPath: "/"
+      Matcher:
+        HttpCode: "200"
+      TargetType: "instance"
+      TargetGroupAttributes:
+        -
+          Key: "deregistration_delay.timeout_seconds"
+          Value: "0"
+  uiListenerRuleHttps:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref listenerHttps
+      Priority: 3
+      Conditions:
+        -
+          Field: "path-pattern"
+          Values:
+            - "/"
+      Actions:
+        -
+          Type: "forward"
+          TargetGroupArn: !Ref uiTargetGroup
+  uiListenerRuleHttp:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref listenerHttp
+      Priority: 2
+      Conditions:
+        -
+          Field: "path-pattern"
+          Values:
+            - "/"
+      Actions:
+        -
+          Type: "forward"
+          TargetGroupArn: !Ref uiTargetGroup
+  loadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn:
+      - subnetZoneA
+      - subnetZoneB
+      - loadBalancerSecurityGroup
+    Properties:
+      Name: !Join
+        - '-'
+        - - !Ref cluster
+          - 'lb'
+      Scheme: "internet-facing"
+      IpAddressType: "ipv4"
+      Type: "application"
+      SecurityGroups:
+        - !Ref loadBalancerSecurityGroup
+      Subnets:
+        - !Ref subnetZoneA
+        - !Ref subnetZoneB
+  listenerHttps:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: "forward"
+          TargetGroupArn: !Ref uiTargetGroup
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      LoadBalancerArn: !Ref loadBalancer
+      Port: 443
+      Protocol: "HTTPS"
+  listenerHttp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        -
+          Type: "forward"
+          TargetGroupArn: !Ref uiTargetGroup
+      LoadBalancerArn: !Ref loadBalancer
+      Port: 80
+      Protocol: "HTTP"
+  listenerHttpDevicePort:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        -
+          Type: "forward"
+          TargetGroupArn: !Ref apiTargetGroup
+      LoadBalancerArn: !Ref loadBalancer
+      Port: 7788
+      Protocol: "HTTP"
+  launchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref InstanceImageId
+      SecurityGroups:
+        - !Ref ec2SecurityGroup
+      KeyName: !Ref InstanceKeyPair
+      UserData:
+        Fn::Base64:
+          !Sub |
+          #!/bin/bash -xe
+          echo ECS_CLUSTER=${cluster} >> /etc/ecs/ecs.config
+          sudo yum install -y python34
+          curl -O https://bootstrap.pypa.io/get-pip.py
+          python3 get-pip.py --user
+          export PATH=~/.local/bin:$PATH
+          source ~/.bash_profile
+          pip install --upgrade --user awscli
+          aws configure set default.region us-east-1
+          aws configure set aws_access_key_id ${ecrUserAccessKey}
+          aws configure set aws_secret_access_key ${ecrUserAccessKey.SecretAccessKey}
+          eval $(aws ecr get-login --no-include-email | sed 's|https://||')
+      InstanceType: !Ref InstanceType
+      InstanceMonitoring: true
+      IamInstanceProfile: !Ref ecsInstanceProfile
+      EbsOptimized: false
+  autoScalingGroup:
+    DependsOn:
+      - subnetZoneA
+      - subnetZoneB
+      - launchConfiguration
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref subnetZoneA
+        - !Ref subnetZoneB
+      Cooldown: "60"
+      DesiredCapacity: "1"
+      HealthCheckGracePeriod: 0
+      HealthCheckType: EC2
+      LaunchConfigurationName: !Ref launchConfiguration
+      MaxSize: "1"
+      MinSize: "0"
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - !Ref ClusterName
+              - 'cluster'
+              - 'instance'
+          PropagateAtLaunch: true
+  dataBaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Database subnet, to create a database into a vpc
+      SubnetIds:
+        - !Ref subnetZoneA
+        - !Ref subnetZoneB
+  databaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: DatabaseSecurityGroup
+      GroupDescription: Database Security Group
+      VpcId: !Ref vpc
+      SecurityGroupIngress:
+        -
+          Description: EC2 to database access security group
+          IpProtocol: "-1"
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref ec2SecurityGroup
+  database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: !Ref DataBaseStorage
+      BackupRetentionPeriod: !Ref DatabaseRetentionPeriod
+      DBInstanceClass: !Ref DBInstanceType
+      DBInstanceIdentifier: !Ref DatabaseInstanceName
+      DBName: !Ref DatabaseName
+      Engine: postgres
+      EngineVersion: 16.2
+      MasterUsername: !Ref DatasourceUser
+      MasterUserPassword: !Ref DatasourcePassword
+      MultiAZ: false
+      Port: 5432
+      PubliclyAccessible: true
+      StorageType: gp2
+      DBSubnetGroupName: !Ref dataBaseSubnetGroup
+      DeletionProtection: true
+      VPCSecurityGroups:
+        - !Ref databaseSecurityGroup
+Outputs:
+  Cluster:
+    Value: !Ref cluster
+  LoadBalancer:
+    Value: !GetAtt loadBalancer.DNSName
