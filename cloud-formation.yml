@@ -29,7 +29,7 @@ Parameters:
   ClusterName:
     Type: String
     Description: Name of the cluster
-    Default: strategy-prod
+    Default: alfil-prod
   ActiveProfile:
     Type: String
     Description: Active profile properties (dev, qa prod)
@@ -37,11 +37,11 @@ Parameters:
   CertificateArn:
     Type: String
     Description: Arn of the certificate for https
-    Default: arn:aws:acm:us-east-1:654654402720:certificate/bd46792c-4141-46fb-afea-353f8d1534df
+    Default: arn:aws:acm:us-east-1:502154089745:certificate/8dd14848-3605-4eb9-a808-944e3e91ed11
   InstanceImageId:
     Type: String
     Description: EC2 Instance Image ID
-    Default: ami-0dde61416371df99a
+    Default: ami-01622b740380d90fe
   InstanceKeyPair:
     Type: String
     Description: Name of an existing EC2 KeyPair to enable SSH access to the cluster instances
@@ -66,14 +66,6 @@ Parameters:
     Default: db.t3.micro
     AllowedValues:
       - db.t3.micro
-  DatasourceUser:
-    Type: String
-    Description: Datasource user
-    Default: master_user
-  DatasourcePassword:
-    Type: String
-    Description: Datasource Password
-    Default: Cloud$97531
   DatabaseRetentionPeriod:
     Type: Number
     Default: 1
@@ -109,6 +101,7 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -117,6 +110,19 @@ Resources:
             Principal:
               Service: ec2.amazonaws.com
             Action: sts:AssumeRole
+  ecsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
   ecsServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -135,19 +141,6 @@ Resources:
       Roles:
         - !Ref ecsInstanceRole
       Path: '/'
-  ecrUser:
-    Type: AWS::IAM::User
-    Properties:
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess
-      UserName: !Join
-        - '-'
-        - - !Ref ClusterName
-          - 'ecr-user'
-  ecrUserAccessKey:
-    Type: AWS::IAM::AccessKey
-    Properties:
-      UserName: !Ref ecrUser
   vpc:
     Type: AWS::EC2::VPC
     Properties:
@@ -241,12 +234,13 @@ Resources:
         - '-'
         - - !Ref cluster
           - 'api-td'
+      ExecutionRoleArn: !Ref ecsTaskExecutionRole
       ContainerDefinitions:
         - Name: api
           Cpu: 600
           Memory: 800
           MemoryReservation: 800
-          Image: 502154089745.dkr.ecr.us-east-1.amazonaws.com/alfil/api:main-1
+          Image: 502154089745.dkr.ecr.us-east-1.amazonaws.com/alfil/api:main-83
           PortMappings:
             - ContainerPort: 80
               HostPort: 0
@@ -255,6 +249,11 @@ Resources:
             Options:
               awslogs-group: !Ref apiLogGroup
               awslogs-region: "us-east-1"
+          Secrets:
+            - Name: SPRING_DATASOURCE_USERNAME
+              ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/alfil/prod/datasource/user'
+            - Name: SPRING_DATASOURCE_PASSWORD
+              ValueFrom: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/alfil/prod/datasource/password'
           Environment:
             - Name: SPRING_DATASOURCE_URL
               Value: !Join
@@ -265,14 +264,12 @@ Resources:
                   -  !GetAtt database.Endpoint.Port
                   - "/"
                   - !Ref DatabaseName
-            - Name: SPRING_DATASOURCE_USERNAME
-              Value: !Ref DatasourceUser
-            - Name: SPRING_DATASOURCE_PASSWORD
-              Value: !Ref DatasourcePassword
             - Name: SERVER_PORT
               Value: '80'
             - Name: SPRING_PROFILES_ACTIVE
               Value: !Ref ActiveProfile
+            - Name: SERVER_CONTEXT-PATH
+              Value: "/api"
   apiService:
     Type: AWS::ECS::Service
     DependsOn:
@@ -309,7 +306,10 @@ Resources:
       - loadBalancer
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: 'pa-api-tg'
+      Name: !Join
+        - '-'
+        - - !Ref cluster
+          - 'api-tg'
       VpcId:
         !Ref vpc
       Protocol: "HTTP"
@@ -354,7 +354,7 @@ Resources:
           Cpu: 400
           Memory: 100
           MemoryReservation: 100
-          Image: 502154089745.dkr.ecr.us-east-1.amazonaws.com/alfil/web-ui:main-1
+          Image: 502154089745.dkr.ecr.us-east-1.amazonaws.com/alfil/web-ui:main-16
           PortMappings:
             - ContainerPort: 80
               HostPort: 0
@@ -483,37 +483,34 @@ Resources:
       LoadBalancerArn: !Ref loadBalancer
       Port: 7788
       Protocol: "HTTP"
-  launchConfiguration:
-    Type: AWS::AutoScaling::LaunchConfiguration
+  launchTemplate:
+    Type: AWS::EC2::LaunchTemplate
     Properties:
-      ImageId: !Ref InstanceImageId
-      SecurityGroups:
-        - !Ref ec2SecurityGroup
-      KeyName: !Ref InstanceKeyPair
-      UserData:
-        Fn::Base64:
-          !Sub |
-          #!/bin/bash -xe
-          echo ECS_CLUSTER=${cluster} >> /etc/ecs/ecs.config
-          sudo yum install -y python34
-          curl -O https://bootstrap.pypa.io/get-pip.py
-          python3 get-pip.py --user
-          export PATH=~/.local/bin:$PATH
-          source ~/.bash_profile
-          pip install --upgrade --user awscli
-          aws configure set default.region us-east-1
-          aws configure set aws_access_key_id ${ecrUserAccessKey}
-          aws configure set aws_secret_access_key ${ecrUserAccessKey.SecretAccessKey}
-          eval $(aws ecr get-login --no-include-email | sed 's|https://||')
-      InstanceType: !Ref InstanceType
-      InstanceMonitoring: true
-      IamInstanceProfile: !Ref ecsInstanceProfile
-      EbsOptimized: false
+      LaunchTemplateName: !Join
+        - '-'
+        - - !Ref ClusterName
+          - 'launch-template'
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Arn: !GetAtt ecsInstanceProfile.Arn
+        ImageId: !Ref InstanceImageId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref InstanceKeyPair
+        SecurityGroupIds:
+          - !Ref ec2SecurityGroup
+        UserData:
+          Fn::Base64:
+            !Sub |
+            #!/bin/bash -xe
+            cat <<'EOF' >> /etc/ecs/ecs.config
+            ECS_CLUSTER=${cluster}
+            ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true
+            EOF
   autoScalingGroup:
     DependsOn:
       - subnetZoneA
       - subnetZoneB
-      - launchConfiguration
+      - launchTemplate
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       VPCZoneIdentifier:
@@ -523,7 +520,9 @@ Resources:
       DesiredCapacity: "1"
       HealthCheckGracePeriod: 0
       HealthCheckType: EC2
-      LaunchConfigurationName: !Ref launchConfiguration
+      LaunchTemplate:
+        LaunchTemplateId: !Ref launchTemplate
+        Version: "1"
       MaxSize: "1"
       MinSize: "0"
       Tags:
@@ -564,8 +563,8 @@ Resources:
       DBName: !Ref DatabaseName
       Engine: postgres
       EngineVersion: 16.2
-      MasterUsername: !Ref DatasourceUser
-      MasterUserPassword: !Ref DatasourcePassword
+      MasterUsername: !Sub '{{resolve:ssm:/alfil/prod/datasource/user:1}}'
+      MasterUserPassword: !Sub '{{resolve:ssm-secure:/alfil/prod/datasource/password:1}}'
       MultiAZ: false
       Port: 5432
       PubliclyAccessible: true
@@ -574,6 +573,22 @@ Resources:
       DeletionProtection: true
       VPCSecurityGroups:
         - !Ref databaseSecurityGroup
+  ecsSecretsManagerPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ECSSecretsManagerPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - ssms:GetParameters
+            Resource:
+              - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/alfil/prod/datasource/user'
+              - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/alfil/prod/datasource/password'
+      Roles:
+        - Ref: ecsTaskExecutionRole
 Outputs:
   Cluster:
     Value: !Ref cluster
